@@ -1,0 +1,737 @@
+## Introduction
+
+In this tutorial you will learn how to process your data to perform differential abundance analysis, plot relative abundance and generate customized PCoA plots in R.
+
+### Learning outcomes
+
+-   Use R to import QIIME 2 data as a phyloseq object and how to access its different components.
+-   Process the phyloseq object for different avenues of analysis.
+-   Determine what taxa are present at different levels between two samples using differential abundance analysis.
+-   Express abundance levels as a relative abundance plot.
+-   Calculate diversity metrics and plot them in R.
+
+::: instructions
+As you work through this tutorial in RStudio, you will run each code block and complete the exercises to test your understanding of the concepts. Click the green "▶" symbol at the top right corner of the gray cell below to try running a cell. The cell's outputs will then appear below it.
+:::
+
+```{r}
+print(intToUtf8(rev(utf8ToInt("!llec siht nar ev'uoy"))))
+```
+
+## Setup
+
+Download rest of files
+
+``` {r}
+FILE_STORE = "https://raw.githubusercontent.com/Tony-xy-Liu/FileStore/main"
+download.file(sprintf("%s/phyloseq_script_sol.Rmd", FILE_STORE), destfile = 'solutions.Rmd')
+```
+
+We first need to install and load our packages into the current R session. The following may take longer than 10 minutes. Watch the "Console" tab below and if prompted with "Update all/some/none? [a/s/n]:" choose "all" by typing `a` and pressing `Enter`.
+
+```{r}
+# install CRAN packages
+if (!require("tidyverse")) install.packages("tidyverse")
+if (!require("vegan")) install.packages("vegan")
+if (!require("ape")) install.packages("ape")
+
+# install Bioconductor packages
+if (!require("BiocManager")) install.packages("BiocManager")
+
+if (!require("phyloseq")) BiocManager::install("phyloseq")
+if (!require("DESeq2")) BiocManager::install("DESeq2")
+```
+
+These packages will have to be loaded each time R is started before they can be used.
+
+```{r}
+# Load CRAN packages
+library(tidyverse)
+library(vegan)
+library(ape)
+
+# Load Bioconductor packages
+library(phyloseq)
+library(DESeq2)
+```
+
+
+
+### Helper functions
+
+You will work with a lot of functions that are provided by various R packages. Here we define specialized functions that are otherwise not available.
+
+```{r}
+# Calculate relative abundance
+calculate_relative_abundance <- function(x) x / sum(x)
+# Calculate geometric mean 
+calculate_gm_mean <- function(x, na.rm = TRUE) {
+  exp(sum(log(x[x > 0]), na.rm = na.rm) / length(x))
+}
+```
+
+### Setting global constants
+
+These are values that we will be using repeatedly. If we ever want to change them, having them all in one place allows us to make the change once instead of at each location where the value is used.
+
+```{r}
+INPUT_DIR <- "provided/from_qiime"
+RNG_SEED <- 711
+```
+
+### Setting random numbers
+
+Random numbers in R are randomly distributed but come in a predetermined sequence. `set.seed()` allows us to select a specific set of random numbers and makes the analysis reproducible, i.e. someone else running the analysis will receive the same random numbers and thus the same results dependent on those numbers.
+
+```{r}
+set.seed(RNG_SEED)
+```
+
+## Preparing a phyloseq object
+
+After having exported your data from QIIME 2, you will import it into R using a package called phyloseq. All of your data will be combined into a single so-called phyloseq object. Similar to QIIME 2, you can only interact with your data in strictly defined ways provided by the package. You will encounter specialized functions to import your data and manipulate them. This has the advantage to mostly prevent you from inadvertently corrupting your data during processing, but you will also be unable to do more advanced processing of your metadata if need be. If you should realize that your metadata needs to be processed outside of the scope provided by the phyloseq package then it is best to do so before you import the metadata file into R.
+
+### Importing data from QIIME 2
+
+The following step will import the output you have created in QIIME 2 so you can continue to work with them here in R. In this tutorial, we will use the outputs from the Moving Pictures tutorial. Notice the use of the `INPUT_DIR` variable.
+
+```{r}
+# Export biom file and tree from QIIME2 and provide original metadata file
+biom_file <- import_biom(sprintf("%s/table-with-taxonomy.biom", INPUT_DIR))
+metadata  <- import_qiime_sample_data(sprintf("%s/sample-metadata.tsv", INPUT_DIR))
+```
+
+::: exercise
+Provide the path to "tree.nwk" using `INPUT_DIR`
+:::
+
+```{r}
+tree <- read_tree_greengenes(...)
+```
+
+phyloseq also offers functions to calculate diversity metrics in R (instead of using the corresponding commands in QIIME 2). If a diversity metrics includes phylogenetic distances then phyloseq assumes that the provided phylogenetic tree is in a dichotomous format (i.e. each branch point has exactly 2 branches). **Unfortunately, QIIME 2 exports phylogenetic trees in a multichotomous format (i.e. each branch branch point has 2 or more branches) which would result in incorrect metrics calculated by phyloseq without giving us a warning.** For that reason, we must first convert the phylogenetic tree contained in `tree.nwk` from to a multichotomous to a dichotomous format. ![](provided/images/MultToDi.png){width="350"}
+
+```{r}
+# Convert from multichotomous to dichotmous tree
+tree <- multi2di(tree)
+```
+
+Now we will gather all of this information into a single, so-called, phyloseq object.
+
+```{r}
+# Combine all information into a single phyloseq object
+physeq <- merge_phyloseq(biom_file, metadata, tree)
+```
+
+### Exploring phyloseq objects
+
+By calling `physeq`, you will receive some basic metrics of your data and additional function names on how to access specific information.
+
+```{r}
+physeq
+```
+
+You can check if the number of samples or taxa (i.e. ASVs) contained in the object matches what you would expect based on the information you observed in QIIME2. In our example, there are 770 unique amplicon sequence variants in 34 samples.
+
+One of the given functions is `sample_data()` and allows us to look at the how to access the information. Here, we also use the `head()` function to limit the output to the first 10 lines.
+
+```{r}
+head(sample_data(physeq))
+```
+
+If we explore the taxonomic information contained in `physeq` with `tax_table()`, you will notice that the table does not use the proper taxonomic rank names but `"Rank1"`, `"Rank2"` and so on.
+
+```{r}
+head(tax_table(physeq))
+```
+
+With the following code, we convert taxonomic rank from numbers to proper names. `colnames()` allows us to assign new names to each of the columns of `tax_table(physeq)`.
+
+```{r}
+colnames(tax_table(physeq)) <- c("Kingdom", "Phylum", "Class","Order", "Family",
+                                 "Genus", "Species")
+```
+
+::: exercise
+Use `head` to take a peek at the results.
+:::
+
+```{r}
+
+```
+
+## Data processing
+
+There are standard data processing steps you will execute before you can perform your analysis. As we cover these steps, we will demonstrate them in isolation, i.e. we will always use the original `physeq` object, but in practice, you will almost always combine steps, and the output of one step will be the input of the next. It is crucial to perform these steps in the sequence given, but you will use not all steps for a given workflow. When using a workflow, refer to the figure below to see which steps you need to include.
+
+![](provided/images/workflow.png)
+
+### 1) Filter by sequencing depth
+
+As a first step of quality control, you need to decide if you would like to exclude any samples based on their sequencing depth. Low sequencing depth might indicate a problem during processing of the sample. You can calculate the sequencing depth using `sample_sums()`.
+
+```{r}
+sample_sums(physeq)
+```
+
+Just as an example, we will keep only samples that have 1000 reads or more. In R, we often use comparison operators to check if a condition is `TRUE` or `FALSE`.
+
+| R code       | meaning                       |
+|--------------|-------------------------------|
+| `==`         | equal to                      |
+| `!=`         | not equal to                  |
+| `<` or `>`   | less/greater than             |
+| `<=` or `>=` | less/greater than or equal to |
+
+: Comparison operators
+
+In our case, we want to know which of our samples have at least 1000 reads.
+
+```{r}
+sample_sums(physeq) >= 1000
+```
+
+As you can see, each one of the samples that fulfills the conditions evaluates to a `TRUE`. We can use this information with `prune_samples(<samples to keep>, <phyloseq object>)` to keep only those samples.
+
+```{r}
+at_least_1000 <- prune_samples(sample_sums(physeq) >= 1000, physeq)
+sample_sums(at_least_1000)
+```
+
+::: exercise
+Keep samples in `physeq` with more than 4000 reads.
+:::
+
+```{r}
+
+```
+
+The sample with the lowest reads in `physeq` is 898 and we decide to **not exclude any samples** based on that criterion.
+
+### 2) Filter by metadata
+
+Based on your research question, you will have to decide what samples you will analyse dependent on their metadata. We can investigate the metadata information of our phyloseq object with `sample_data()`.
+
+```{r}
+sample_data(physeq)
+```
+
+In QIIME 2, you saw a PCoA plot similar to this:
+
+```{r echo = FALSE, message = FALSE, warning = FALSE, purl = FALSE}
+physeq_rar <- rarefy_even_depth(physeq, sample.size = 1250, rngseed=RNG_SEED)
+ord <- ordinate(physeq_rar, method = "PCoA", distance = "wunifrac")
+plot_ordination(physeq_rar,
+                ord,
+                color = "body.site") +
+  # Define title of plot
+  labs(title = "PCoA (weighted UniFrac)") +
+  theme_bw() +
+  # Postion a ellipses around each group of data, `type` determines how centre
+  # is determined, `size` the thickness of the line
+  stat_ellipse(type = "norm", size = 0.5) +
+  # Manually adjust colours and labels (here changed to first letter uppercase)
+  scale_colour_manual(values = c("blue", "red", "black", "yellow"),
+                      labels = c("Gut", "Left palm", "Right palm", "Tongue")) +
+  # Themes change the basic look of your plot
+  # Rename the title of your legend
+  guides(color = guide_legend("Body site"))
+# Reset seed
+set.seed(RNG_SEED)
+```
+
+::: exercise
+Just think about this one. Based on the distances among samples, would you combine all body sites in your downstream analyses?
+:::
+
+You can filter your data by any metadata category. We can see that 8 of our samples have the value `"gut"` for the variable `body.site`. Depending on our planned analysis, we might want to only work with the gut samples and want to remove any others. We can select specific samples by using `subset_samples(<phyloseq object>, <samples to keep>)` and specifying which rows we want to keep by using comparison operators (see table above). The logical operator to only keep exact matches is `==` (i.e. "equal to" or "include") and we can define a conditions to keep a row as `<variable> == <value>`.
+
+```{r}
+gut <- subset_samples(physeq, body.site == "gut")
+gut
+```
+
+::: exercise
+Sometimes it is easier to specify which samples to filter out by using `!=` (i.e. "not equal to" or "exclude"). Use `!=` to keep everything except those from the "gut".
+:::
+
+```{r}
+
+```
+
+### 3) Rarefy
+
+Diversity analysis requires rarefied taxa tables, which is accomplished by sub sampling each sample to have the same number of reads.![](provided/images/alphaRarefaction.png) We know from our QIIME 2 analysis that we should rarefy to about 1000 (we used 1103) and we do the same here using `rarefy_even_depth()`. `sample.size` is the sample size being simulated, also known as depth.
+
+```{r}
+physeq_rar <- rarefy_even_depth(physeq, sample.size = 1000, rngseed=RNG_SEED)
+```
+
+### 4) Calculate relative abundance
+
+To be able to compare the abundance of a taxon across samples in relative abundance plots, we need to normalize that value by converting it the relative abundance within sample (i.e. for each sample: count of taxon / total counts).
+
+```{r}
+physeq_RA <- transform_sample_counts(physeq, calculate_relative_abundance)
+```
+
+::: exercise
+Another thinking one - why not use `physeq_rar` here?
+:::
+
+### 5) Remove low-abundant features
+
+Low-abundant features interfere with differential abundance analysis. For that reason, we determine the total count of a feature across all samples to then calculate its relative abundance.
+
+```{r}
+total_counts <- taxa_sums(physeq)
+relative_abundance <- calculate_relative_abundance(total_counts)
+```
+
+Analogous to filtering samples, we first determine what sequences have a higher relative abundance than a threshold (usually 0.005 or 0.1%, i.e. a ratio of 0.0005 or 0.001), and use that information to filter out any below with `prune_taxa()`.
+
+```{r}
+abundant <- relative_abundance > 0.0005 
+abundant_taxa <- prune_taxa(abundant, physeq)
+abundant_taxa
+```
+
+As you can see, this leads to a drastic reduction of features down to 123 (out of 770 at the start).
+
+### 6) Set taxonomic level for analysis
+
+Often resolving the data at the feature level is not too helpful. We can agglomerate the information at a taxonomic level using `tax_glom()` and specifying the argument `taxrank`, for example, at the `"Family"` level:
+
+```{r}
+family <- tax_glom(physeq, taxrank = "Family", NArm = FALSE)
+family
+```
+
+The number of samples is not affected (still 34), but the number taxa is down to 135 taxa, i.e. you have 135 families in this data set.
+
+## Differential abundance analysis with DESeq2
+
+In differential abundance analysis, we determine what taxa are significantly different between two groups. First, we will do the analysis at the genus level. We will compare the microbiome in the gut of the two `subject`s. We have to filter the `body.site` for the `"gut"` samples and then remove any low-abundant features before we agglomerate at the genus level.
+
+::: exercise
+Process the data in `physeq` based on the description above.
+:::
+
+```{r message = FALSE, warning = FALSE}
+# filter to gut
+gut <- subset_samples(...)
+
+# prune suspected taxonomic outliers
+relative_abundance_gut <- calculate_relative_abundance(...)
+abundant_gut <- ...
+abundant_gut_taxa <- prune_taxa(...)
+
+# aggregate by Genus
+abundant_gut_genera <- tax_glom(...)
+abundant_gut_genera
+```
+
+For differential abundance analysis with DESeq2, we have to first create a DESeq2 object with `phyloseq_to_deseq2()`. `phyloseq_to_deseq2()` takes 2 arguments: a phyloseq object, and the categorical variable you want to compare.
+
+```{r message = FALSE, warning = FALSE}
+deseq_gut <- phyloseq_to_deseq2(abundant_gut_genera, ~ subject)
+```
+
+Differential abundance analyses compare two groups of samples. In our case, we will compare group `"subject-2"` to group `"subject-1"` (as defined in `subject`). One group will be used as reference (often called "NULL" or "control"), and the abundances in the other group will be given relative to the reference.
+
+In the following example, we will use `"subject-1"` as a reference to express abundances in `"subject-2"`. `phyloseq_to_deseq2()` converted our variable, `subject`, to a factor (i.e. the data type R uses to represent categorical variables). We can define the reference group with `relevel(<variable>, ref = <reference group>)`.`<deseq object>$<variable>` allows us to access a variable in the metadata of our phyloseq object.
+
+```{r}
+deseq_gut$subject <- relevel(deseq_gut$subject, ref = "subject-1")
+```
+
+The following steps instruct DESeq2 to calculate the results.
+
+```{r message = FALSE, warning = False}
+geo_means <- apply(counts(deseq_gut), 1, calculate_gm_mean)
+deseq_gut <- estimateSizeFactors(deseq_gut, geoMeans = geo_means)
+deseq_gut <- DESeq(deseq_gut, fitType = "local")
+```
+
+Suppose your categorical variable has more than two possible values. In that case, DESeq2 will automatically calculate all pair-wise comparisons of your reference group to each of the other groups. `resultsNames()` returns the names of all performed comparisons.
+
+```{r}
+resultsNames(deseq_gut)
+```
+
+Since `subject` only contains two groups (`"subject-1"` as reference and `"subject-2"`), there is only one possible comparison, `"subject_subject.2_vs_subject.1"` (`"Intercept"` contains additional information that we will not need). We will now extract the `results()` and can specify what comparison we would like with `name` (if not specified, the first comparison listed with `resultsNames()` is returned) and define the `alpha` level to determine significant changes.
+
+```{r}
+gut_diff_abund <- results(deseq_gut, name = "subject_subject.2_vs_subject.1")
+```
+
+Now we will define the `alpha` level to determine significant changes. We convert our results from DESeq to a data frame to process them further. The `filter(<data frame>, <conditions>)` allows us to filter for any taxa (i.e. any row) in which the FDR-corrected p-value `padj` is below `alpha`. The remaining taxa are all significantly different between our subjects.
+
+```{r}
+alpha <- 0.05
+significant_gut <- as.data.frame(gut_diff_abund)
+significant_gut <- filter(significant_gut, padj < alpha)
+```
+
+At the moment our taxa names are the feature IDs. To get the more descriptive taxonomic ranks, we will have to `merge()` the table with significant results with the table of taxonomic information. With the argument `by` we tell `merge()` to use the `row.names` (i.e. the feature IDs) to match rows between the two tables. `arrange()` sorts a data frame by a variable from lowest to highest. Sorting by `log2FoldChange` puts the largest differences in one condition at the top (high absolute value with a minus sign) and the other condition at the bottom (high absolute value with a plus sign).
+
+```{r}
+genera_df <- as.data.frame(tax_table(abundant_gut_genera))
+significant_gut <- merge(significant_gut, genera_df, by = "row.names")
+significant_gut <- arrange(significant_gut, log2FoldChange)
+dim(significant_gut)
+significant_gut
+```
+
+Great work! There are `15` genera that are significantly different abundant between the two subjects!
+
+Let's create a quick plot to visualize the differential abundance data. Before we can plot data, we often need to convert a variable to a explicitly categorical variable called factors in R. The `mutate()` function allows us to transform a variable and `factor()` species a categorical variable. We will explore in the next section how we can step-wise create plots with `ggplot()`!
+
+```{r}
+significant_gut <- mutate(significant_gut,
+                          Genus = factor(Genus, levels = Genus))
+ggplot(significant_gut, aes(x = log2FoldChange, y = Genus)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Differential abundant genera",
+       x = expression(log[2]~fold~change),
+       y = "Genus") +
+  theme_bw()
+```
+
+As a reminder: a abundances are expressed as abundances in the group `"subject-2"` relative to group `"subject-1"` (the control/NULL). For example, The genus *Alistipes* is 8.4 times more abundant in `"subject-2"` vs. `"subject-1"` samples.
+
+::: exercise
+Perform a differential abundance analysis if antibiotic usage had an effect on the tongue microbiome at the "Family" taxonomic level using `"No"` antibiotic usage as control. ***Increase alpha to 0.5***.
+:::
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, purl = FALSE}
+# filter to tongue
+
+
+# remove low abundance taxa with RA <= 0.0005
+
+
+
+
+# aggregate
+
+sample_data(family)$reported.antibiotic.usage <-factor(sample_data(family)$reported.antibiotic.usage, levels = c("No", "Yes"))
+```
+
+```{r}
+# take a peek
+as.data.frame(otu_table(family))
+```
+
+```{r}
+# to deseq
+
+
+
+
+
+# to dataframe
+
+
+
+
+
+# filter by "significance" (alpha = 0.5)
+
+
+
+# final dataframe
+
+
+significant_family
+```
+
+```{r}
+# plot
+
+
+
+
+
+
+```
+
+## Creating relative abundance plots
+
+Based on your result from the differential abundance analysis, you might want to highlight some of the taxa you have identified based on a literature review of them.
+
+Here---as an arbitrary example---we will look at the genus *Alistipes*. We first have to calculate the relative abundance for the entire genera set of the gut (see the workflow diagram for the processing steps) and then we subset to the genus of interest.
+
+::: exercise
+Obtain the relative abundance table for *Alistipes*.
+:::
+
+```{r warning = FALSE, results = "hide"}
+# filter to only gut
+
+
+# remove taxa with low abundance
+
+
+
+
+# get relative abundance
+
+
+
+# aggregate by Genus and subset to only "g__Alistipes"
+
+alistipes <- ...
+```
+
+```{r echo = FALSE}
+as.data.frame(otu_table(alistipes))
+```
+
+Before we can plot our data, we need to transform our data frame from wide (every sample is its own column) to long (each sample is a row) format using `psmelt()`. At the same time, this function combines the OTU, sample, and taxonomic information of a phyloseq object---here `alistipes` into a single data frame.
+
+```{r}
+alistipes_long <- psmelt(alistipes)
+alistipes_long
+```
+
+Now our data is ready to be plotted! The phyloseq package was designed to use the ggplot2 package for making graphs.
+
+### Why ggplot?
+
+-   Wilkinson, *Grammar of Graphics* (1999)
+
+-   ggplot2 is an implementation of GoG for R
+
+-   Benefits:
+
+    -   Handsome default settings
+    -   Snap-together building block approach
+    -   Automatic legends, colours, facets
+    -   Statistical overlays: regressions lines and smoothers (with confidence intervals)
+
+-   Drawbacks:
+
+    -   It can be hard to get it to look *exactly* the way you want
+    -   Requires having the input data in a certain format
+
+### ggplot building blocks
+
++--------------+-------------------------------------------------------------------------------------------------------+
+| Component    | Description                                                                                           |
++==============+=======================================================================================================+
+| data         | 2D table (`data.frame`) of variables.                                                                 |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *aesthetics* | Map variables to visual attributes (*e.g.* position).                                                 |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *geoms*      | Graphical representation of data (points, lines, etc.).                                               |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *stats*      | Statistical transformations to get from data to points in the plot (binning, summarizing, smoothing). |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *scales*     | Control *how* to map a variable to an aesthetic.                                                      |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *facets*     | Juxtapose mini-plots of data subsets, split by variable(s).                                           |
++--------------+-------------------------------------------------------------------------------------------------------+
+| *guides*     | Axes, legend, etc. reflect the variables and their values.                                            |
++--------------+-------------------------------------------------------------------------------------------------------+
+
+The organizing idea of ggplot is to independently specify and combine the blocks to create the plot you want. There are at least three things we have to specify to create a plot:
+
+1.  Data
+2.  Aesthetic mappings from data variables to visual properties
+3.  A layer describing how to draw those properties
+
+### Contructing a box plot
+
+The base function of ggplot2 is---fittingly---`ggplot()` and its first argument takes the data.
+
+```{r}
+ggplot(alistipes_long)
+```
+
+The second argument of `ggplot()` specifies how variables of a data frame are mapped to visual attributes of the plot (i.e. defines the aesthetics) by using the `aes()`function. For a relative abundance plot, we want to plot the `Abundance` on the y-axis for different conditions (here `subject`) on the x-axis.
+
+```{r}
+ggplot(alistipes_long, aes(x = subject, y = Abundance))
+```
+
+We give our data a shape by choosing a geom. For our graph, we will summarize a group of measurements as box plot using `geom_boxplot()`. Note how we add the geom as an additonal layer of the plot by using a `+`.
+
+```{r}
+ggplot(alistipes_long, aes(x = subject, y = Abundance)) +
+  geom_boxplot() 
+```
+
+The line inside of the box represent the median, and the lower and upper hinges the first and third quartiles. The box itself represents the interquartile range (IQR). The upper whisker goes either to the highest measurement or the the $upper~hinge + 1.5 \times IQR$, whichever is lower, and the lower whisker goes either to the lowest measurement or the $lower~hinge - 1.5 \times IQR$, whichever is higher. Any data points outside the range of the whiskers are plotted individually.
+
+Now we can also layer on additional features to our plot. For example `labs()` adds custom labels.
+
+```{r}
+ggplot(alistipes_long, aes(x = subject, y = Abundance)) +
+  geom_boxplot() +
+  labs(title = "Relative abundance of Alistipes",
+       x     = "Subject",
+       y     = "Relative abundance")
+```
+
+Finally, we can define the `colour` aesthetic to differentiate between the two `subject`s.
+
+```{r}
+ggplot(alistipes_long, aes(x = subject, y = Abundance, fill = subject)) +
+  geom_boxplot() +
+  labs(title = "Relative abundance of Alistipes",
+       x     = "Subject",
+       y     = "Relative abundance")
+```
+
+As a nice feature of ggplot, we can save a plot in a variable and then further modify it.
+
+```{r}
+p <- ggplot(alistipes_long, aes(x = subject, y = Abundance, fill = subject)) +
+  geom_boxplot() +
+  labs(title = "Relative abundance of Alistipes",
+       x     = "Subject",
+       y     = "Relative abundance")
+```
+
+You notice that the plot is not directly generated and you see a `p` variable in your environment. You can show the plot by calling the variable.
+
+```{r}
+p
+```
+
+Now we can experiment further by adding new layers. For example, we can define what fill colours ggplot should use with `scale_fill_manual()`.
+
+```{r}
+p + scale_fill_manual(values = c("seagreen3", "indianred1"))
+```
+
+But note that these changes have not been assigned to the variable `p`.
+
+```{r}
+p
+```
+
+Looking at the graph, you might notice that we do not need the legend as the boxplots are clearly labeled on the x-axis. (Actually, colour in general is not necessary for this particular plot). We can modify the legend with `guides()` and let's make that change permanent.
+
+```{r warning = FALSE}
+p <- p + guides(fill = FALSE)
+p
+```
+
+By default, ggplot uses a gray color scheme. However, there are a number of other themes that come with ggplot as well as many more in the additional package ggthemes. You can see many examples from [ggplot](https://datascienceplus.com/ggplot2-themes-examples/) or [ggthemes](http://www.rpubs.com/Mentors_Ubiqum/ggthemes_1).
+
+For example, you can apply a black and white theme with `theme_bw()`.
+
+```{r}
+p + theme_bw()
+```
+
+After you are satisfied with your results, you can simply save your plot in RStudio with the "Export" button in the "Plots" tab. However, for a fully reproducible script, checkout the `ggsave()` function!
+
+```{r eval = FALSE}
+ggsave("relative_abundance.pdf", p, width = 10, height = 6)
+```
+
+::: exercise
+Make a relative abundance box-plot for *Streptococcus* between the 4 body sites.
+:::
+
+```{r}
+
+```
+
+## ß-diversity PCoA plots
+
+The main motivation for repeating diversity analyses in R would be the increased flexibility to create a plot.
+
+Diversity analysis requires rarefied taxa tables. We know from our QIIME 2 analysis that we should rarefy to about 1000 reads.
+
+```{r message = FALSE}
+physeq_rar <- rarefy_even_depth(physeq, sample.size = 1000, rngseed = RNG_SEED)
+```
+
+The diversity analysis is performed with `oridnate()` by setting `method` to `"PCoA"` and setting `distance` to the metric of interest here weighted UniFrac (`"wunifrac"`). Look at the documentation with `?ordinate()` for possible values of `distance` for other metrics like Jaccard index, Bray--Curtis dissimilarity, etc.
+
+```{r}
+ord <- ordinate(physeq_rar, method = "PCoA", distance = "wunifrac")
+```
+
+`ord` is a `pcoa` object and, unfortunately, we cannot directly use `ggplot()` to create our plot. Instead, the phyloseq package provided a specialized plotting function that creates the basic graph for us that we can then further customize with elements from the ggplot2 package. Our basic plot is created by `plot_oridnation()` that takes as its first two arguments the rarefied phyloseq object with relative abundance information (`physeq_rar_RA`) and the result from its ordination (`ord`). We then specify which metadata category to colour (here based `"body.site"`).
+
+```{r}
+plot_ordination(physeq_rar,
+                ord,
+                color = "body.site")
+```
+
+We can add additonal layers from ggplot that we have encountered before to customize the title and theme of the plot.
+
+```{r}
+plot_ordination(physeq_rar,
+                ord,
+                color = "body.site") +
+  # Define title of plot
+  labs(title = "PCoA (weighted UniFrac)") +
+  theme_bw()
+```
+
+A very common addition to PCoA plots in R are ellipses around groups with `stat_ellipse()` to help as visual guide (but they do not have any statistical meaning).
+
+```{r message = FALSE, warning = FALSE}
+plot_ordination(physeq_rar,
+                ord,
+                color = "body.site") +
+  # Define title of plot
+  labs(title = "PCoA (weighted UniFrac)") +
+  theme_bw() +
+  # Postion a ellipses around each group of data, `type` determines how centre
+  # is determined, `size` the thickness of the line
+  stat_ellipse(type = "norm", size = 0.5)
+```
+
+Finally, below a few examples on how to add custom text, colours, or legend text to the plot. Check out the documentation of `annotate()`, `scale_colour_manual()` or `guides()` to learn about more the arguments and possible options.
+
+```{r message = FALSE, warning = FALSE}
+plot_ordination(physeq_rar,
+                ord,
+                color = "body.site") +
+  # Define title of plot
+  labs(title = "PCoA (weighted UniFrac)") +
+  theme_bw() +
+  # Postion a ellipses around each group of data, `type` determines how centre
+  # is determined, `size` the thickness of the line
+  stat_ellipse(type = "norm", size = 0.5) +
+  # Add custom text to plot, define placement and size with `x`, `y` and `size`
+  annotate(geom = "text",
+           label = "My great label",
+           x = -0.08,
+           y = 0.18,
+           size = 4) +
+  # Manually adjust colours and labels (here changed to first letter uppercase)
+  scale_colour_manual(values = c("blue", "red", "black", "yellow"),
+                      labels = c("Gut", "Left palm", "Right palm", "Tongue")) +
+  # Themes change the basic look of your plot
+  # Rename the title of your legend
+  guides(color = guide_legend("Body site"))
+```
+
+::: exercise
+Make a PCoA plot using `Jaccard` as the metric to see if the two `subjects` can be resolved. Use blue and orange for the colours.
+:::
+
+```{r}
+
+```
+
+### Thanks for attending the amplicon workshop by EDUCE!
+
+## Additional resources
+
+### phyloseq
+
+You can view all its vignettes with `browse_vignettes("phyloseq")`. For a general introduction on creating a phyloseq object and on manipulating its data, check out `vignette("phyloseq-basics")`. For typical examples of analysis workflows with phyloseq, see `vignette("phyloseq-analysis")`. Finally, you can find a number of tutorials on the [website of the phyloseq package](http://joey711.github.io/phyloseq/index.html).
+
+### ggplot2
+
+There are many options to modify your plot in ggplot, check out the [ggplot cheatsheet](https://github.com/rstudio/cheatsheets/raw/master/data-visualization-2.1.pdf). More [R cheatsheets](https://www.rstudio.com/resources/cheatsheets/) to many different topics are also available in RStudio under Help \> Cheatsheets.
