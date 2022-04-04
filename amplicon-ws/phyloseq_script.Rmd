@@ -20,11 +20,13 @@ print(intToUtf8(rev(utf8ToInt("!llec siht nar ev'uoy"))))
 
 ## Setup
 
-Download rest of files
+Get rest of provided files. Close and reopen this file (phyloseq_script.Rmd) from the bottom right.
 
-``` {r}
-FILE_STORE = "https://raw.githubusercontent.com/Tony-xy-Liu/FileStore/main"
+```{r}
+FILE_STORE = "https://raw.githubusercontent.com/Tony-xy-Liu/FileStore/main/amplicon-ws"
 download.file(sprintf("%s/phyloseq_script_sol.Rmd", FILE_STORE), destfile = 'solutions.Rmd')
+download.file(sprintf("%s/provided.zip", FILE_STORE), destfile = 'provided.zip')
+unzip('./provided.zip')
 ```
 
 We first need to install and load our packages into the current R session. The following may take longer than 10 minutes. Watch the "Console" tab below and if prompted with "Update all/some/none? [a/s/n]:" choose "all" by typing `a` and pressing `Enter`.
@@ -54,8 +56,6 @@ library(ape)
 library(phyloseq)
 library(DESeq2)
 ```
-
-
 
 ### Helper functions
 
@@ -517,23 +517,15 @@ Now our data is ready to be plotted! The phyloseq package was designed to use th
 
 ### ggplot building blocks
 
-+--------------+-------------------------------------------------------------------------------------------------------+
 | Component    | Description                                                                                           |
-+==============+=======================================================================================================+
+|--------------|-------------------------------------------------------------------------------------------------------|
 | data         | 2D table (`data.frame`) of variables.                                                                 |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *aesthetics* | Map variables to visual attributes (*e.g.* position).                                                 |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *geoms*      | Graphical representation of data (points, lines, etc.).                                               |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *stats*      | Statistical transformations to get from data to points in the plot (binning, summarizing, smoothing). |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *scales*     | Control *how* to map a variable to an aesthetic.                                                      |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *facets*     | Juxtapose mini-plots of data subsets, split by variable(s).                                           |
-+--------------+-------------------------------------------------------------------------------------------------------+
 | *guides*     | Axes, legend, etc. reflect the variables and their values.                                            |
-+--------------+-------------------------------------------------------------------------------------------------------+
 
 The organizing idea of ggplot is to independently specify and combine the blocks to create the plot you want. There are at least three things we have to specify to create a plot:
 
